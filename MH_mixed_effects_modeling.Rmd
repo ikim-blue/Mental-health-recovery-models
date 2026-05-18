@@ -1,0 +1,1799 @@
+---
+title: "Final Mental Health Recovery Models"
+author: "Ian Kim"
+date: "2025-11-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(haven)
+library(dplyr)
+library(lubridate)
+library(lme4)
+library(ggplot2)
+library(tidyr)
+library(splines)
+library(broom.mixed)
+```
+
+
+```{r}
+# ==============================================================================
+# 1. DATA LOAD & COMPREHENSIVE CLEANING
+# ==============================================================================
+full_model_data <- read.csv("full_model_data.csv")
+
+analysis_df <- full_model_data %>%
+  mutate(
+    # ===========================================================================
+    # DEMOGRAPHICS
+    # ===========================================================================
+    age_group = if_else(age_group < 0, NA_real_, age_group),
+    age_group = factor(age_group,
+                       levels = c(2, 3, 4, 5, 6, 7, 8),
+                       labels = c("10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70+")),
+    
+    sex = if_else(sex < 0, NA_real_, sex),
+    sex = as.factor(sex),
+    
+    # ===========================================================================
+    # MENTAL HEALTH (GHQ)
+    # ===========================================================================
+    GHQ_score = if_else(GHQ_score < 0, NA_real_, GHQ_score),
+    
+    # ===========================================================================
+    # HEALTH & FINANCES
+    # ===========================================================================
+    sf12pcs = if_else(sf12pcs < 0, NA_real_, sf12pcs),
+    financial_status = if_else(financial_status < 0, NA_real_, financial_status),
+    
+    # FIXED: Add factor version of financial status for models
+    financial_status_f = factor(
+      financial_status,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c("Living comfortably", "Doing alright", 
+                 "Just getting by", "Finding it difficult", 
+                 "Very difficult")
+    ),
+    
+    # ===========================================================================
+    # EDUCATION
+    # ===========================================================================
+    education_level = if_else(education_level < 0, NA_real_, education_level),
+    education = case_when(
+      education_level %in% c(1, 2) ~ "Higher ed",
+      education_level %in% c(3, 4) ~ "Secondary",
+      education_level %in% c(5, 9) ~ "Other/None",
+      TRUE ~ NA_character_
+    ),
+    # FIXED:  Consistent factor level order (Other/None as reference)
+    education = factor(education, 
+                       levels = c("Other/None", "Secondary", "Higher ed")),
+    
+    # ===========================================================================
+    # SOCIAL SUPPORT (POSITIVE)
+    # ===========================================================================
+    positive_friend_ss = if_else(positive_friend_ss < 0, NA_real_, positive_friend_ss),
+    positive_family_ss = if_else(positive_family_ss < 0, NA_real_, positive_family_ss),
+    positive_spouse_ss = if_else(positive_spouse_ss < 0, NA_real_, positive_spouse_ss),
+    
+    # ===========================================================================
+    # SOCIAL STRAIN (NEGATIVE)
+    # ===========================================================================
+    negative_friend_ss = if_else(negative_friend_ss < 0, NA_real_, negative_friend_ss),
+    negative_family_ss = if_else(negative_family_ss < 0, NA_real_, negative_family_ss),
+    negative_spouse_ss = if_else(negative_spouse_ss < 0, NA_real_, negative_spouse_ss),
+    
+    # ===========================================================================
+    # PARTNER STATUS
+    # ===========================================================================
+    live_w_partner = if_else(live_w_partner < 0, NA_real_, live_w_partner),
+    live_w_spouse = if_else(live_w_spouse < 0, NA_real_, live_w_spouse),
+    
+    # ===========================================================================
+    # LIFESTYLE - SLEEP
+    # ===========================================================================
+    sleep_hrs = if_else(sleep_hrs < 0, NA_real_, sleep_hrs),
+    sleep_mins = if_else(sleep_mins < 0, NA_real_, sleep_mins),
+    total_sleep_hours = sleep_hrs + (sleep_mins / 60),
+    
+    # ===========================================================================
+    # LIFESTYLE - DIET
+    # ===========================================================================
+    weekly_fruit = if_else(weekly_fruit < 0, NA_real_, weekly_fruit),
+    weekly_veggies = if_else(weekly_veggies < 0, NA_real_, weekly_veggies),
+    
+    # ===========================================================================
+    # LIFESTYLE - EXERCISE
+    # ===========================================================================
+    weekly_walked = if_else(weekly_walked < 0, NA_real_, weekly_walked),
+    weekly_m_exercised = if_else(weekly_m_exercised < 0, NA_real_, weekly_m_exercised),
+    weekly_v_exercised = if_else(weekly_v_exercised < 0, NA_real_, weekly_v_exercised),
+    
+    # ===========================================================================
+    # SOCIAL MEDIA (Dropped from models but clean anyway)
+    # ===========================================================================
+    sm_post_freq = if_else(sm_post_freq < 0, NA_real_, sm_post_freq),
+    sm_look_freq = if_else(sm_look_freq < 0, NA_real_, sm_look_freq),
+    
+    # ===========================================================================
+    # WAVE HANDLING
+    # ===========================================================================
+    wave = as.factor(wave)
+  )
+
+# Verify cleaning worked
+cat("=== POST-CLEANING SUMMARY ===\n")
+cat("Total rows:", nrow(analysis_df), "\n")
+cat("GHQ valid:", sum(! is.na(analysis_df$GHQ_score)), "\n")
+cat("Age group valid:", sum(!is.na(analysis_df$age_group)), "\n")
+cat("Sex valid:", sum(!is.na(analysis_df$sex)), "\n")
+cat("Education valid:", sum(!is.na(analysis_df$education)), "\n")
+cat("Financial status factor valid:", sum(!is.na(analysis_df$financial_status_f)), "\n")  # FIXED: Added check
+```
+
+```{r}
+# ==============================================================================
+# 2. WAVE NUMERIC CONVERSION
+# ==============================================================================
+analysis_df <- analysis_df %>%
+  mutate(
+    wave_char = as.character(wave),
+    wave_numeric = case_when(
+      wave_char == "b" ~ 2,
+      wave_char == "e" ~ 5,
+      wave_char == "g" ~ 7,
+      wave_char == "i" ~ 9,
+      wave_char == "k" ~ 11,
+      wave_char == "m" ~ 13,
+      wave_char == "n" ~ 14,
+      wave_char == "o" ~ 15,
+      TRUE ~ suppressWarnings(as.numeric(wave_char))
+    ),
+    wave_factor = as.factor(wave_numeric)
+  )
+```
+
+```{r}
+# ==============================================================================
+# 3. CHECK ACTUAL DATA AVAILABILITY (Accounting for Negative = Missing)
+# ==============================================================================
+
+# Check GHQ availability (negative values = missing)
+ghq_availability <- analysis_df %>%
+  mutate(GHQ_valid = if_else(GHQ_score >= 0, GHQ_score, NA_real_)) %>%
+  group_by(wave_numeric) %>%
+  summarise(
+    n_total = n(),
+    n_ghq = sum(! is.na(GHQ_valid)),
+    .groups = "drop"
+  )
+
+print("GHQ Availability by Wave (excluding negatives):")
+print(ghq_availability)
+
+# Check social support availability
+social_support_availability <- analysis_df %>%
+  mutate(
+    friend_valid = if_else(positive_friend_ss >= 0, positive_friend_ss, NA_real_),
+    family_valid = if_else(positive_family_ss >= 0, positive_family_ss, NA_real_),
+    spouse_valid = if_else(positive_spouse_ss >= 0, positive_spouse_ss, NA_real_)
+  ) %>%
+  group_by(wave_numeric) %>%
+  summarise(
+    n_total = n(),
+    n_friend = sum(!is.na(friend_valid)),
+    n_family = sum(!is.na(family_valid)),
+    n_spouse = sum(!is.na(spouse_valid)),
+    .groups = "drop"
+  )
+
+print("Social Support Availability by Wave (excluding negatives):")
+print(social_support_availability)
+
+# Check social strain availability
+social_strain_availability <- analysis_df %>%
+  group_by(wave_numeric) %>%
+  summarise(
+    n_total = n(),
+    n_friend_strain = sum(!is.na(negative_friend_ss)),
+    n_family_strain = sum(!is.na(negative_family_ss)),
+    n_spouse_strain = sum(!is.na(negative_spouse_ss)),
+    .groups = "drop"
+  )
+
+print("Social Strain Availability by Wave:")
+print(social_strain_availability)
+
+# Check lifestyle variables
+lifestyle_availability <- analysis_df %>%
+  mutate(
+    sleep_valid = if_else(sleep_hrs >= 0, sleep_hrs, NA_real_),
+    fruit_valid = if_else(weekly_fruit >= 0, weekly_fruit, NA_real_),
+    exercise_valid = if_else(weekly_v_exercised >= 0, weekly_v_exercised, NA_real_)
+  ) %>%
+  group_by(wave_numeric) %>%
+  summarise(
+    n_total = n(),
+    n_sleep = sum(!is.na(sleep_valid)),
+    n_fruit = sum(!is.na(fruit_valid)),
+    n_exercise = sum(!is.na(exercise_valid)),
+    .groups = "drop"
+  )
+
+print("Lifestyle Variable Availability by Wave (excluding negatives):")
+print(lifestyle_availability)
+
+# FIXED: Add check for social support ceiling effects
+cat("\n=== SOCIAL SUPPORT CEILING CHECK ===\n")
+analysis_df %>%
+  filter(! is.na(positive_friend_ss)) %>%
+  summarise(
+    friend_mean = mean(positive_friend_ss, na.rm = TRUE),
+    friend_median = median(positive_friend_ss, na.rm = TRUE),
+    friend_pct_at_max = mean(positive_friend_ss == 4, na.rm = TRUE) * 100,
+    family_pct_at_max = mean(positive_family_ss == 4, na.rm = TRUE) * 100
+  ) %>%
+  print()
+```
+
+```{r}
+# ==============================================================================
+# DEMOGRAPHICS PANEL EDA
+# ==============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+# --- A. Age Group ---
+p_age <- analysis_df %>%
+  filter(!is.na(age_group) & ! is.na(GHQ_score)) %>%
+  group_by(age_group) %>%
+  summarise(
+    n = n(),
+    mean_ghq = mean(GHQ_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = age_group, y = mean_ghq, fill = age_group)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_viridis_d(option = "plasma", end = 0.85) +
+  labs(
+    title = "Age",
+    x = NULL,
+    y = "Mean GHQ-12"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+    axis.text.x = element_text(hjust = 0.5, size = 7.5),
+    axis.title.y = element_text(face = "bold", margin = margin(r = 12), size = 12)
+  ) +
+  coord_cartesian(ylim = c(0, 17))
+
+# --- B. Sex ---
+p_sex <- analysis_df %>%
+  filter(sex %in% c(1, 2) & !is.na(GHQ_score)) %>%
+  mutate(sex_label = if_else(sex == 1, "Male", "Female")) %>%
+  group_by(sex_label) %>%
+  summarise(
+    n = n(),
+    mean_ghq = mean(GHQ_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = sex_label, y = mean_ghq, fill = sex_label)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("Female" = "pink", "Male" = "lightblue")) +
+  labs(
+    title = "Sex",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+    axis.text.x = element_text(size = 9),
+  ) +
+  coord_cartesian(ylim = c(0, 17))
+
+# --- C. Education ---
+p_edu <- analysis_df %>%
+  filter(!is.na(education) & !is.na(GHQ_score)) %>%
+  mutate(education = recode(education, "Other/None" = "None"))%>%
+  group_by(education) %>%
+  summarise(
+    n = n(),
+    mean_ghq = mean(GHQ_score, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = education, y = mean_ghq, fill = education)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("None" = "#FC8D62", 
+                                "Secondary" = "#8DA0CB", 
+                                "Higher ed" = "#A6D854")) +
+  labs(
+    title = "Education",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_family = "sans") +
+  theme(
+    plot.title = element_text(face = "bold", size = 11, hjust = 0.5),
+    axis.text.x = element_text(angle = 30, hjust = 0.6, vjust = 1, size = 8)
+  ) +
+  coord_cartesian(ylim = c(0, 17))
+
+# --- D.  Combine into Single Panel ---
+demographics_panel <- p_age + p_sex + p_edu +
+  plot_annotation(
+    title = "Mental Health Across Demographics",
+    subtitle = "Average GHQ-12 scores by age, sex, and education level",
+    caption = "Note: Higher GHQ-12 = worse mental health.",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 11, color = "grey30"),
+      plot.caption = element_text(size = 9, color = "grey50", hjust = 0)
+    )
+  )
+
+# --- E. Display ---
+demographics_panel + plot_layout(widths = c(2, 1, 1.5))
+```
+
+```{r}
+# ==============================================================================
+# FINANCIAL STATUS BY POOLED WAVE PERIODS (Years)
+# ==============================================================================
+
+# A.  Prepare data with pooled waves
+financial_by_period <- analysis_df %>%
+  filter(! is.na(financial_status) & financial_status > 0 & ! is.na(GHQ_score)) %>%
+  filter(!is.na(wave_numeric)) %>%
+  mutate(
+    # Pool waves into periods (adjust years based on your actual wave years)
+    wave_period = case_when(
+      wave_numeric %in% c(2, 5) ~ "2010-2014",
+      wave_numeric %in% c(7, 9) ~ "2015-2018",
+      wave_numeric %in% c(11, 13) ~ "2019-2022",
+      wave_numeric %in% c(14, 15) ~ "2023-2024",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(! is.na(wave_period)) %>%
+  mutate(
+    wave_period = factor(wave_period, levels = c("2010-2014", "2015-2018", "2019-2022", "2023-2024"))
+  ) %>%
+  group_by(financial_status, wave_period) %>%
+  summarise(
+    mean_ghq = mean(GHQ_score, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+# Check the data
+print("Data summary:")
+print(financial_by_period)
+
+# B. Plot
+ggplot(financial_by_period, aes(x = factor(financial_status), y = mean_ghq, fill = wave_period)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.8, color = NA) +
+  scale_fill_manual(
+    values = c("2010-2014" = "#8FA8E7", 
+               "2015-2018" = "#C3D2EC", 
+               "2019-2022" = "#E8C9BB", 
+               "2023-2024" = "#DC917D"),
+    name = "Time Period"
+  ) +
+  scale_x_discrete(
+    labels = c("Living\ncomfortably", 
+               "Doing alright", 
+               "Just getting by", 
+               "Finding it\ndifficult", 
+               "Very difficult")
+  ) +
+  scale_y_continuous(
+    limits = c(0, 23),
+    breaks = seq(0, 23, by = 2.5),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Mean Mental Health (GHQ-12) by Financial Status Over Time",
+    x = "Perceived Financial Situation",
+    y = "Mean GHQ-12 Score"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0),
+    axis.text.x = element_text(size = 8, lineheight = 0.9),
+    axis.text.y = element_text(size = 8),
+    axis.title = element_text(size = 12),
+    legend.position = "right",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line = element_line(color = "black", linewidth = 0.5),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.ticks = element_line(color = "black", linewidth = 0.5)
+  )
+```
+
+```{r}
+# ==============================================================================
+# 4. MODEL 1: SOCIAL CONNECTIONS (Pooled 2-Year Gaps)
+# ==============================================================================
+
+ghq_cutoff <- 14
+
+# A. First, clean negative values as NA
+social_clean <- analysis_df %>%
+  mutate(
+    GHQ_score = if_else(GHQ_score < 0, NA_real_, GHQ_score),
+    positive_friend_ss = if_else(positive_friend_ss < 0, NA_real_, positive_friend_ss),
+    positive_family_ss = if_else(positive_family_ss < 0, NA_real_, positive_family_ss),
+    positive_spouse_ss = if_else(positive_spouse_ss < 0, NA_real_, positive_spouse_ss),
+    negative_friend_ss = if_else(negative_friend_ss < 0, NA_real_, negative_friend_ss),
+    negative_family_ss = if_else(negative_family_ss < 0, NA_real_, negative_family_ss),
+    negative_spouse_ss = if_else(negative_spouse_ss < 0, NA_real_, negative_spouse_ss),
+    sf12pcs = if_else(sf12pcs < 0, NA_real_, sf12pcs),
+    financial_status = if_else(financial_status < 0, NA_real_, financial_status)
+  )
+
+# B. Create wide format to properly link baseline to follow-up
+
+# Get baseline waves (W5 and W11)
+baseline_waves <- social_clean %>%
+  filter(wave_numeric %in% c(5, 11)) %>%
+  select(pidp, wave_numeric, 
+         GHQ_baseline = GHQ_score,
+         positive_friend_ss, positive_family_ss, positive_spouse_ss,
+         negative_friend_ss, negative_family_ss, negative_spouse_ss,
+         sf12pcs, financial_status, financial_status_f, education,  # FIXED: Include factor
+         live_w_partner, live_w_spouse,
+         age_group, sex)
+
+# Get outcome waves (W7 and W13)
+outcome_waves <- social_clean %>%
+  filter(wave_numeric %in% c(7, 13)) %>%
+  select(pidp, 
+         wave_outcome = wave_numeric,
+         GHQ_outcome = GHQ_score)
+
+# C. Join baseline to outcome (W5→W7, W11→W13)
+social_df <- baseline_waves %>%
+  mutate(
+    wave_outcome_expected = case_when(
+      wave_numeric == 5 ~ 7,
+      wave_numeric == 11 ~ 13,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  inner_join(
+    outcome_waves,
+    by = c("pidp", "wave_outcome_expected" = "wave_outcome")
+  ) %>%
+  filter(!is.na(GHQ_baseline) & GHQ_baseline >= ghq_cutoff) %>%
+  filter(!is.na(GHQ_outcome)) %>%
+  filter(!is.na(positive_friend_ss) & !is.na(positive_family_ss)) %>%
+  filter(!is.na(negative_friend_ss) & !is.na(negative_family_ss)) %>%
+  mutate(
+    reliable_recovery = as.integer(
+      (GHQ_baseline - GHQ_outcome) >= 4 & 
+      GHQ_outcome < ghq_cutoff
+    ),
+    GHQ_score = GHQ_baseline,
+    GHQ_next = GHQ_outcome
+  )
+
+# D. Check distribution across waves
+print("Social Connections Model - Observations by Baseline Wave:")
+social_df %>%
+  group_by(wave_numeric) %>%
+  summarise(
+    n = n(),
+    n_recovered = sum(reliable_recovery, na.rm = TRUE),
+    recovery_rate = round(mean(reliable_recovery, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  print()
+
+print(paste("Total Social Model N:", nrow(social_df)))
+print(paste("Overall Recovery Rate:", round(mean(social_df$reliable_recovery, na.rm = TRUE), 3)))
+```
+
+```{r}
+# ==============================================================================
+# 5. SOCIAL CONNECTIONS:  CENTERING & PARTNER LOGIC
+# ==============================================================================
+
+# A.  Partner Logic
+social_df <- social_df %>%
+  mutate(
+    has_partner = if_else(live_w_partner == 1 | live_w_spouse == 1, 1, 0),
+    has_partner = if_else(is.na(has_partner), 0, has_partner)
+  )
+
+# B. Partner Stats (for spouse support/strain - partnered people only)
+partner_stats <- social_df %>%
+  filter(has_partner == 1) %>%
+  summarise(
+    m_spouse_support = mean(positive_spouse_ss, na.rm = TRUE),
+    sd_spouse_support = sd(positive_spouse_ss, na.rm = TRUE),
+    m_spouse_strain = mean(negative_spouse_ss, na.rm = TRUE),
+    sd_spouse_strain = sd(negative_spouse_ss, na.rm = TRUE)
+  )
+
+print("Partner Stats:")
+print(partner_stats)
+
+# C. Scale on FULL POOLED SAMPLE
+social_df <- social_df %>%
+  filter(sex %in% c(1, 2)) %>%
+  mutate(sex = droplevels(as.factor(sex))) %>%
+  mutate(
+    # Spouse SUPPORT (special handling for partnered only)
+    spouse_c_temp = (positive_spouse_ss - partner_stats$m_spouse_support) / partner_stats$sd_spouse_support,
+    spouse_c = case_when(
+      has_partner == 0 ~ 0,
+      has_partner == 1 & ! is.na(spouse_c_temp) ~ spouse_c_temp,
+      TRUE ~ NA_real_
+    ),
+    
+    # Spouse STRAIN (special handling for partnered only)
+    spouse_strain_c_temp = (negative_spouse_ss - partner_stats$m_spouse_strain) / partner_stats$sd_spouse_strain,
+    spouse_strain_c = case_when(
+      has_partner == 0 ~ 0,
+      has_partner == 1 & !is.na(spouse_strain_c_temp) ~ spouse_strain_c_temp,
+      TRUE ~ NA_real_
+    ),
+    
+    # Scale SUPPORT on POOLED sample
+    GHQ_c = as.numeric(scale(GHQ_score)),
+    family_c = as.numeric(scale(positive_family_ss)),
+    friend_c = as.numeric(scale(positive_friend_ss)),
+    
+    # Scale STRAIN on POOLED sample
+    family_strain_c = as.numeric(scale(negative_family_ss)),
+    friend_strain_c = as.numeric(scale(negative_friend_ss)),
+    
+    # Scale controls
+    sf12pcs_c = as.numeric(scale(sf12pcs)),
+    # FIXED: Removed numeric scaling of financial_status
+    # financial_status_c = as.numeric(scale(financial_status)),  # REMOVED
+    
+    # FIXED:  Ensure financial_status_f exists and has valid levels
+    financial_status_f = factor(
+      financial_status,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c("Living comfortably", "Doing alright", 
+                 "Just getting by", "Finding it difficult", 
+                 "Very difficult")
+    ),
+    
+    # Factors
+    has_partner_f = as.factor(has_partner),
+    wave_factor = as.factor(wave_numeric)
+  ) %>%
+  filter(
+    ! is.na(spouse_c) & !is.na(family_c) & !is.na(friend_c) &
+    !is.na(spouse_strain_c) & !is.na(family_strain_c) & !is.na(friend_strain_c) &
+    !is.na(sf12pcs_c) & !is.na(education) & !is.na(financial_status_f)  # FIXED: Check factor
+  )
+
+# D. Split into groups
+social_df_partnered <- social_df %>% filter(has_partner == 1)
+social_df_unpartnered <- social_df %>% filter(has_partner == 0)
+
+print(paste("Partnered N:", nrow(social_df_partnered)))
+print(paste("Unpartnered N:", nrow(social_df_unpartnered)))
+
+# E. Check by wave within groups
+print("Partnered by Wave:")
+social_df_partnered %>% count(wave_numeric) %>% print()
+
+print("Unpartnered by Wave:")
+social_df_unpartnered %>% count(wave_numeric) %>% print()
+```
+
+```{r}
+# ==============================================================================
+# 6. SOCIAL CONNECTIONS: STRATIFIED MODELS (With Wave Control)
+# ==============================================================================
+
+# --- A.  PARTNERED MODEL ---
+# FIXED: Changed financial_status_c to financial_status_f
+partnered_model <- glmer(
+  reliable_recovery ~ 
+    GHQ_c + 
+    # Social Support Block
+    spouse_c + family_c + friend_c + 
+    # Social Strain Block
+    spouse_strain_c + family_strain_c + friend_strain_c +
+    # Controls
+    sf12pcs_c + financial_status_f + education +  # FIXED
+    as.factor(age_group) + as.factor(sex) + 
+    wave_factor +
+    (1 | pidp), 
+  data = social_df_partnered, 
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+print("=== PARTNERED MODEL ===")
+summary(partnered_model)
+
+# --- B. UNPARTNERED MODEL ---
+# FIXED: Changed financial_status_c to financial_status_f
+unpartnered_model <- glmer(
+  reliable_recovery ~ 
+    GHQ_c + 
+    # Social Support Block (NO spouse_c)
+    family_c + friend_c + 
+    # Social Strain Block (NO spouse_strain_c)
+    family_strain_c + friend_strain_c +
+    # Controls
+    sf12pcs_c + financial_status_f + education +  # FIXED
+    as.factor(age_group) + as.factor(sex) + 
+    wave_factor +
+    (1 | pidp), 
+  data = social_df_unpartnered, 
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+print("=== UNPARTNERED MODEL ===")
+summary(unpartnered_model)
+```
+
+```{r}
+# ==============================================================================
+# 7. SOCIAL CONNECTIONS: VISUALIZATION
+# ==============================================================================
+
+# A. Stats from FULL POOLED SAMPLE
+full_sample_stats <- social_df %>%
+  summarise(
+    # Support
+    spouse_support_mean = mean(positive_spouse_ss[has_partner == 1], na.rm = TRUE),
+    spouse_support_sd   = sd(positive_spouse_ss[has_partner == 1], na.rm = TRUE),
+    family_support_mean = mean(positive_family_ss, na.rm = TRUE),
+    family_support_sd   = sd(positive_family_ss, na.rm = TRUE),
+    friend_support_mean = mean(positive_friend_ss, na.rm = TRUE),
+    friend_support_sd   = sd(positive_friend_ss, na.rm = TRUE),
+    # Strain
+    spouse_strain_mean = mean(negative_spouse_ss[has_partner == 1], na.rm = TRUE),
+    spouse_strain_sd   = sd(negative_spouse_ss[has_partner == 1], na.rm = TRUE),
+    family_strain_mean = mean(negative_family_ss, na.rm = TRUE),
+    family_strain_sd   = sd(negative_family_ss, na.rm = TRUE),
+    friend_strain_mean = mean(negative_friend_ss, na.rm = TRUE),
+    friend_strain_sd   = sd(negative_friend_ss, na.rm = TRUE)
+  )
+
+# B. Group-specific means for control variables
+group_control_means <- social_df %>%
+  group_by(has_partner) %>%
+  summarise(
+    sf12_z = mean(sf12pcs_c, na.rm = TRUE),
+    ghq_z = mean(GHQ_c, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+partnered_controls <- group_control_means %>% filter(has_partner == 1)
+unpartnered_controls <- group_control_means %>% filter(has_partner == 0)
+
+# C. Reference persons (use modal wave for prediction)
+modal_wave_partnered <- social_df_partnered %>% 
+  count(wave_factor) %>% 
+  slice_max(n) %>% 
+  pull(wave_factor)
+
+modal_wave_unpartnered <- social_df_unpartnered %>% 
+  count(wave_factor) %>% 
+  slice_max(n) %>% 
+  pull(wave_factor)
+
+# Use median/mode values
+ref_partnered <- social_df_partnered %>%
+  summarise(
+    age_group = names(which.max(table(age_group))),
+    sex = names(which.max(table(sex))),
+    education = names(which.max(table(education))),
+    pidp = first(pidp)
+  )
+ref_unpartnered <- social_df_unpartnered %>%
+  summarise(
+    age_group = names(which.max(table(age_group))),
+    sex = names(which.max(table(sex))),
+    education = names(which.max(table(education))),
+    pidp = first(pidp)
+  )
+
+# ==============================================================================
+# 7A. SOCIAL SUPPORT VISUALIZATION (Original Style)
+# ==============================================================================
+
+# D. Build Grid for PARTNERED (individual support types)
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_partnered_support <- expand_grid(
+  support_raw = seq(1, 4, length.out = 100),
+  support_type = c("Friend support", "Family support", "Spouse support")
+) %>%
+  mutate(
+    friend_c = case_when(
+      support_type == "Friend support" ~ (support_raw - full_sample_stats$friend_support_mean) / full_sample_stats$friend_support_sd,
+      TRUE ~ 0
+    ),
+    family_c = case_when(
+      support_type == "Family support" ~ (support_raw - full_sample_stats$family_support_mean) / full_sample_stats$family_support_sd,
+      TRUE ~ 0
+    ),
+    spouse_c = case_when(
+      support_type == "Spouse support" ~ (support_raw - full_sample_stats$spouse_support_mean) / full_sample_stats$spouse_support_sd,
+      TRUE ~ 0
+    ),
+    friend_strain_c = 0,
+    family_strain_c = 0,
+    spouse_strain_c = 0,
+    GHQ_c = partnered_controls$ghq_z,
+    sf12pcs_c = partnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED: Use factor level
+    age_group = ref_partnered$age_group,
+    sex = ref_partnered$sex,
+    education = ref_partnered$education,
+    wave_factor = modal_wave_partnered,
+    pidp = ref_partnered$pidp,
+    group = "Partnered"
+  )
+
+# E. Build Grid for UNPARTNERED (individual support types)
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_unpartnered_support <- expand_grid(
+  support_raw = seq(1, 4, length.out = 100),
+  support_type = c("Friend support", "Family support")
+) %>%
+  mutate(
+    friend_c = case_when(
+      support_type == "Friend support" ~ (support_raw - full_sample_stats$friend_support_mean) / full_sample_stats$friend_support_sd,
+      TRUE ~ 0
+    ),
+    family_c = case_when(
+      support_type == "Family support" ~ (support_raw - full_sample_stats$family_support_mean) / full_sample_stats$family_support_sd,
+      TRUE ~ 0
+    ),
+    friend_strain_c = 0,
+    family_strain_c = 0,
+    GHQ_c = unpartnered_controls$ghq_z,
+    sf12pcs_c = unpartnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED: Use factor level
+    age_group = ref_unpartnered$age_group,
+    sex = ref_unpartnered$sex,
+    education = ref_unpartnered$education,
+    wave_factor = modal_wave_unpartnered,
+    pidp = ref_unpartnered$pidp,
+    group = "Unpartnered"
+  )
+
+# F. Build Grid for TOTAL SUPPORT (all sources move together)
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_total_partnered_support <- tibble(
+  support_raw = seq(1, 4, length.out = 100)
+) %>%
+  mutate(
+    support_z = (support_raw - full_sample_stats$friend_support_mean) / full_sample_stats$friend_support_sd,
+    friend_c = support_z,
+    family_c = support_z,
+    spouse_c = support_z,
+    friend_strain_c = 0,
+    family_strain_c = 0,
+    spouse_strain_c = 0,
+    GHQ_c = partnered_controls$ghq_z,
+    sf12pcs_c = partnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED
+    age_group = ref_partnered$age_group,
+    sex = ref_partnered$sex,
+    education = ref_partnered$education,
+    wave_factor = modal_wave_partnered,
+    pidp = ref_partnered$pidp,
+    group = "Partnered",
+    support_type = "Total support"
+  )
+
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_total_unpartnered_support <- tibble(
+  support_raw = seq(1, 4, length.out = 100)
+) %>%
+  mutate(
+    support_z = (support_raw - full_sample_stats$friend_support_mean) / full_sample_stats$friend_support_sd,
+    friend_c = support_z,
+    family_c = support_z,
+    friend_strain_c = 0,
+    family_strain_c = 0,
+    GHQ_c = unpartnered_controls$ghq_z,
+    sf12pcs_c = unpartnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED
+    age_group = ref_unpartnered$age_group,
+    sex = ref_unpartnered$sex,
+    education = ref_unpartnered$education,
+    wave_factor = modal_wave_unpartnered,
+    pidp = ref_unpartnered$pidp,
+    group = "Unpartnered",
+    support_type = "Total support"
+  )
+
+# G. Predict SUPPORT
+viz_grid_partnered_support$pred_prob <- plogis(
+  predict(partnered_model, newdata = viz_grid_partnered_support, re.form = NA)
+)
+viz_grid_unpartnered_support$pred_prob <- plogis(
+  predict(unpartnered_model, newdata = viz_grid_unpartnered_support, re.form = NA)
+)
+viz_grid_total_partnered_support$pred_prob <- plogis(
+  predict(partnered_model, newdata = viz_grid_total_partnered_support, re.form = NA)
+)
+viz_grid_total_unpartnered_support$pred_prob <- plogis(
+  predict(unpartnered_model, newdata = viz_grid_total_unpartnered_support, re.form = NA)
+)
+
+# H. Combine SUPPORT grids
+viz_grid_support_combined <- bind_rows(
+  viz_grid_partnered_support,
+  viz_grid_unpartnered_support,
+  viz_grid_total_partnered_support,
+  viz_grid_total_unpartnered_support
+) %>%
+  mutate(
+    group = factor(group, levels = c("Unpartnered", "Partnered")),
+    support_type = factor(support_type, 
+                          levels = c("Friend support", "Family support", "Spouse support", "Total support"))
+  )
+
+# I. Plot SUPPORT
+ggplot(viz_grid_support_combined, aes(x = support_raw, y = pred_prob, color = support_type, linetype = support_type)) +
+  geom_line(linewidth = 1.2) +
+  facet_wrap(~ group) +
+  scale_color_manual(
+    values = c("Friend support" = "#00BA38",
+               "Family support" = "#F8766D",
+               "Spouse support" = "#619CFF",
+               "Total support" = "grey30")
+  ) +
+  scale_linetype_manual(
+    values = c("Friend support" = "solid",
+               "Family support" = "solid",
+               "Spouse support" = "solid",
+               "Total support" = "dashed")
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +  # FIXED: Added percent format
+  labs(
+    title = "Social Support & Recovery by Relationship Status",
+    subtitle = "Pooled 2-year transitions (W5→7 + W11→13) | Dashed = all sources moving together",
+    x = "Support Score (1 = Low, 4 = High)",
+    y = "Predicted Probability of Recovery",
+    color = "Support Source",
+    linetype = "Support Source",
+    caption = "Note: Control variables set to group-specific means; wave effects controlled."  # FIXED: Added note
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold")) +
+  guides(color = guide_legend(nrow = 1), linetype = guide_legend(nrow = 1))
+```
+
+```{r}
+# ==============================================================================
+# 7B. SOCIAL STRAIN VISUALIZATION (Same Style)
+# ==============================================================================
+
+# J. Build Grid for PARTNERED (individual strain types)
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_partnered_strain <- expand_grid(
+  strain_raw = seq(1, 4, length.out = 100),
+  strain_type = c("Friend strain", "Family strain", "Spouse strain")
+) %>%
+  mutate(
+    friend_strain_c = case_when(
+      strain_type == "Friend strain" ~ (strain_raw - full_sample_stats$friend_strain_mean) / full_sample_stats$friend_strain_sd,
+      TRUE ~ 0
+    ),
+    family_strain_c = case_when(
+      strain_type == "Family strain" ~ (strain_raw - full_sample_stats$family_strain_mean) / full_sample_stats$family_strain_sd,
+      TRUE ~ 0
+    ),
+    spouse_strain_c = case_when(
+      strain_type == "Spouse strain" ~ (strain_raw - full_sample_stats$spouse_strain_mean) / full_sample_stats$spouse_strain_sd,
+      TRUE ~ 0
+    ),
+    friend_c = 0,
+    family_c = 0,
+    spouse_c = 0,
+    GHQ_c = partnered_controls$ghq_z,
+    sf12pcs_c = partnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED
+    age_group = ref_partnered$age_group,
+    sex = ref_partnered$sex,
+    education = ref_partnered$education,
+    wave_factor = modal_wave_partnered,
+    pidp = ref_partnered$pidp,
+    group = "Partnered"
+  )
+
+# K. Build Grid for UNPARTNERED (individual strain types)
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_unpartnered_strain <- expand_grid(
+  strain_raw = seq(1, 4, length.out = 100),
+  strain_type = c("Friend strain", "Family strain")
+) %>%
+  mutate(
+    friend_strain_c = case_when(
+      strain_type == "Friend strain" ~ (strain_raw - full_sample_stats$friend_strain_mean) / full_sample_stats$friend_strain_sd,
+      TRUE ~ 0
+    ),
+    family_strain_c = case_when(
+      strain_type == "Family strain" ~ (strain_raw - full_sample_stats$family_strain_mean) / full_sample_stats$family_strain_sd,
+      TRUE ~ 0
+    ),
+    friend_c = 0,
+    family_c = 0,
+    GHQ_c = unpartnered_controls$ghq_z,
+    sf12pcs_c = unpartnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED
+    age_group = ref_unpartnered$age_group,
+    sex = ref_unpartnered$sex,
+    education = ref_unpartnered$education,
+    wave_factor = modal_wave_unpartnered,
+    pidp = ref_unpartnered$pidp,
+    group = "Unpartnered"
+  )
+
+# L. Build Grid for TOTAL STRAIN (all sources move together)
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_total_partnered_strain <- tibble(
+  strain_raw = seq(1, 4, length.out = 100)
+) %>%
+  mutate(
+    strain_z = (strain_raw - full_sample_stats$friend_strain_mean) / full_sample_stats$friend_strain_sd,
+    friend_strain_c = strain_z,
+    family_strain_c = strain_z,
+    spouse_strain_c = strain_z,
+    friend_c = 0,
+    family_c = 0,
+    spouse_c = 0,
+    GHQ_c = partnered_controls$ghq_z,
+    sf12pcs_c = partnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED
+    age_group = ref_partnered$age_group,
+    sex = ref_partnered$sex,
+    education = ref_partnered$education,
+    wave_factor = modal_wave_partnered,
+    pidp = ref_partnered$pidp,
+    group = "Partnered",
+    strain_type = "Total strain"
+  )
+
+# FIXED: Changed financial_status_c to financial_status_f
+viz_grid_total_unpartnered_strain <- tibble(
+  strain_raw = seq(1, 4, length.out = 100)
+) %>%
+  mutate(
+    strain_z = (strain_raw - full_sample_stats$friend_strain_mean) / full_sample_stats$friend_strain_sd,
+    friend_strain_c = strain_z,
+    family_strain_c = strain_z,
+    friend_c = 0,
+    family_c = 0,
+    GHQ_c = unpartnered_controls$ghq_z,
+    sf12pcs_c = unpartnered_controls$sf12_z,
+    financial_status_f = "Doing alright",  # FIXED
+    age_group = ref_unpartnered$age_group,
+    sex = ref_unpartnered$sex,
+    education = ref_unpartnered$education,
+    wave_factor = modal_wave_unpartnered,
+    pidp = ref_unpartnered$pidp,
+    group = "Unpartnered",
+    strain_type = "Total strain"
+  )
+
+# M. Predict STRAIN
+viz_grid_partnered_strain$pred_prob <- plogis(
+  predict(partnered_model, newdata = viz_grid_partnered_strain, re.form = NA)
+)
+viz_grid_unpartnered_strain$pred_prob <- plogis(
+  predict(unpartnered_model, newdata = viz_grid_unpartnered_strain, re.form = NA)
+)
+viz_grid_total_partnered_strain$pred_prob <- plogis(
+  predict(partnered_model, newdata = viz_grid_total_partnered_strain, re.form = NA)
+)
+viz_grid_total_unpartnered_strain$pred_prob <- plogis(
+  predict(unpartnered_model, newdata = viz_grid_total_unpartnered_strain, re.form = NA)
+)
+
+# N. Combine STRAIN grids
+viz_grid_strain_combined <- bind_rows(
+  viz_grid_partnered_strain,
+  viz_grid_unpartnered_strain,
+  viz_grid_total_partnered_strain,
+  viz_grid_total_unpartnered_strain
+) %>%
+  mutate(
+    group = factor(group, levels = c("Unpartnered", "Partnered")),
+    strain_type = factor(strain_type, 
+                         levels = c("Friend strain", "Family strain", "Spouse strain", "Total strain"))
+  )
+
+# O. Plot STRAIN
+ggplot(viz_grid_strain_combined, aes(x = strain_raw, y = pred_prob, color = strain_type, linetype = strain_type)) +
+  geom_line(linewidth = 1.2) +
+  facet_wrap(~ group) +
+  scale_color_manual(
+    values = c("Friend strain" = "#00BA38",
+               "Family strain" = "#F8766D",
+               "Spouse strain" = "#619CFF",
+               "Total strain" = "grey30")
+  ) +
+  scale_linetype_manual(
+    values = c("Friend strain" = "solid",
+               "Family strain" = "solid",
+               "Spouse strain" = "solid",
+               "Total strain" = "dashed")
+  ) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +  # FIXED: Added percent format
+  labs(
+    title = "Social Strain & Recovery by Relationship Status",
+    subtitle = "Pooled 2-year transitions (W5→7 + W11→13) | Dashed = all sources moving together",
+    x = "Strain Score (1 = Low, 4 = High)",
+    y = "Predicted Probability of Recovery",
+    color = "Strain Source",
+    linetype = "Strain Source"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold")) +
+  guides(color = guide_legend(nrow = 1), linetype = guide_legend(nrow = 1))
+```
+
+```{r}
+# ==============================================================================
+# 8. MODEL 2: LIFESTYLE BEHAVIORS (Pooled 2-Year Gaps)
+# ==============================================================================
+
+# A. Clean negative values as NA
+lifestyle_clean <- analysis_df %>%
+  mutate(
+    GHQ_score = if_else(GHQ_score < 0, NA_real_, GHQ_score),
+    sleep_hrs = if_else(sleep_hrs < 0, NA_real_, sleep_hrs),
+    sleep_mins = if_else(sleep_mins < 0, NA_real_, sleep_mins),
+    weekly_fruit = if_else(weekly_fruit < 0, NA_real_, weekly_fruit),
+    weekly_veggies = if_else(weekly_veggies < 0, NA_real_, weekly_veggies),
+    weekly_walked = if_else(weekly_walked < 0, NA_real_, weekly_walked),
+    weekly_m_exercised = if_else(weekly_m_exercised < 0, NA_real_, weekly_m_exercised),
+    weekly_v_exercised = if_else(weekly_v_exercised < 0, NA_real_, weekly_v_exercised),
+    financial_status = if_else(financial_status < 0, NA_real_, financial_status),
+    total_sleep_hours = sleep_hrs + (sleep_mins / 60),
+    
+    # FIXED: Recode diet variables early
+    fruit_days = case_when(
+      weekly_fruit == 1 ~ 0,
+      weekly_fruit == 2 ~ 2,
+      weekly_fruit == 3 ~ 5,
+      weekly_fruit == 4 ~ 7,
+      TRUE ~ NA_real_
+    ),
+    veg_days = case_when(
+      weekly_veggies == 1 ~ 0,
+      weekly_veggies == 2 ~ 2,
+      weekly_veggies == 3 ~ 5,
+      weekly_veggies == 4 ~ 7,
+      TRUE ~ NA_real_
+    )
+  )
+
+# B. Get baseline waves (W7 and W13)
+baseline_lifestyle <- lifestyle_clean %>%
+  filter(wave_numeric %in% c(7, 13)) %>%
+  select(pidp, wave_numeric,
+         GHQ_baseline = GHQ_score,
+         total_sleep_hours, 
+         fruit_days, veg_days,  # FIXED: Use recoded variables
+         weekly_walked, weekly_m_exercised, weekly_v_exercised,
+         financial_status, financial_status_f, education,
+         live_w_partner, live_w_spouse,
+         age_group, sex)
+
+# C. Get outcome waves (W9 and W15) - unchanged
+outcome_lifestyle <- lifestyle_clean %>%
+  filter(wave_numeric %in% c(9, 15)) %>%
+  select(pidp,
+         wave_outcome = wave_numeric,
+         GHQ_outcome = GHQ_score)
+
+# D. Join baseline to outcome - unchanged except variable names
+model2_df <- baseline_lifestyle %>%
+  mutate(
+    wave_outcome_expected = case_when(
+      wave_numeric == 7 ~ 9,
+      wave_numeric == 13 ~ 15,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  inner_join(
+    outcome_lifestyle,
+    by = c("pidp", "wave_outcome_expected" = "wave_outcome")
+  ) %>%
+  filter(!is.na(GHQ_baseline) & GHQ_baseline >= ghq_cutoff) %>%
+  filter(!is.na(GHQ_outcome)) %>%
+  mutate(
+    reliable_recovery = as.integer(
+      (GHQ_baseline - GHQ_outcome) >= 4 & 
+      GHQ_outcome < ghq_cutoff
+    ),
+    GHQ_score = GHQ_baseline,
+    GHQ_next = GHQ_outcome,
+    has_partner = if_else(live_w_partner == 1 | live_w_spouse == 1, 1, 0),
+    has_partner = if_else(is.na(has_partner), 0, has_partner),
+    wave_factor = as.factor(wave_numeric)
+  )
+```
+
+```{r}
+# ==============================================================================
+# 9. LIFESTYLE:  CENTERING & FINAL SAMPLE
+# ==============================================================================
+
+model2_df <- model2_df %>%
+  filter(sex %in% c(1, 2)) %>%
+  mutate(sex = droplevels(as.factor(sex))) %>%
+  mutate(
+    # Scale on POOLED sample
+    sleep_c = as.numeric(scale(total_sleep_hours)),
+    
+    # FIXED: Scale the recoded fruit/veg days (not the 1-4 codes)
+    fruit_c = as.numeric(scale(fruit_days)),
+    veg_c = as.numeric(scale(veg_days)),
+    
+    # Exercise (unchanged)
+    walk_c = as.numeric(scale(weekly_walked)),
+    mod_ex_c = as.numeric(scale(weekly_m_exercised)),
+    vig_ex_c = as.numeric(scale(weekly_v_exercised)),
+    
+    # Other (unchanged)
+    GHQ_c = as.numeric(scale(GHQ_score)),
+    financial_status_f = factor(
+      financial_status,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c("Living comfortably", "Doing alright", 
+                 "Just getting by", "Finding it difficult", 
+                 "Very difficult")
+    )
+  ) %>%
+  filter(
+    ! is.na(sleep_c) & !is.na(fruit_c) & !is.na(veg_c) &
+    !is.na(vig_ex_c) & !is.na(financial_status_f) & !is.na(education)
+  )
+
+print(paste("Final Lifestyle Sample N:", nrow(model2_df)))
+
+# Verify
+cat("\n=== DIET VARIABLE CHECK (After Recoding) ===\n")
+cat("Fruit days - Mean:", round(mean(model2_df$fruit_days, na.rm = TRUE), 2), 
+    "SD:", round(sd(model2_df$fruit_days, na.rm = TRUE), 2), "\n")
+cat("Veg days - Mean:", round(mean(model2_df$veg_days, na.rm = TRUE), 2), 
+    "SD:", round(sd(model2_df$veg_days, na.rm = TRUE), 2), "\n")
+```
+
+```{r}
+# ==============================================================================
+# 10. LIFESTYLE MODEL (With Wave Control)
+# ==============================================================================
+
+# FIXED: Changed financial_status_c to financial_status_f
+lifestyle_model <- glmer(
+  reliable_recovery ~ 
+    GHQ_c + 
+    # Lifestyle Predictors
+    ns(sleep_c, df = 2) +
+    fruit_c + veg_c + 
+    walk_c + mod_ex_c + vig_ex_c + 
+    # Controls
+    education +
+    financial_status_f +  # FIXED
+    as.factor(has_partner) +
+    as.factor(age_group) + as.factor(sex) + 
+    wave_factor +
+    (1 | pidp), 
+  data = model2_df, 
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000))
+)
+
+print("=== LIFESTYLE MODEL ===")
+summary(lifestyle_model)
+```
+
+```{r}
+# ==============================================================================
+# 11. LIFESTYLE VISUALIZATION:  COMPARING KEY FACTORS
+# ==============================================================================
+
+# A. Get stats for un-scaling axes
+lifestyle_stats <- model2_df %>%
+  summarise(
+    sleep_m = mean(total_sleep_hours, na.rm = TRUE), 
+    sleep_sd = sd(total_sleep_hours, na.rm = TRUE),
+    fruit_m = mean(fruit_days, na.rm = TRUE),       # FIXED: was weekly_fruit
+    fruit_sd = sd(fruit_days, na.rm = TRUE),        # FIXED: was weekly_fruit
+    veg_m = mean(veg_days, na.rm = TRUE),           # FIXED: was weekly_veggies
+    veg_sd = sd(veg_days, na.rm = TRUE),            # FIXED: was weekly_veggies
+    vig_m = mean(weekly_v_exercised, na.rm = TRUE),      
+    vig_sd = sd(weekly_v_exercised, na.rm = TRUE)
+  )
+
+print(lifestyle_stats)
+
+# B. Get modal wave for prediction
+modal_wave_lifestyle <- model2_df %>% 
+  count(wave_factor) %>% 
+  slice_max(n) %>% 
+  pull(wave_factor)
+
+# C. Build prediction grid
+# FIXED: Changed financial_status_c to financial_status_f
+lifestyle_viz_grid <- expand_grid(
+  z_score = seq(-2, 2, length.out = 100),
+  predictor = c("Sleep Duration", "Vegetable Intake", "Walking")
+) %>%
+  mutate(
+    sleep_c = if_else(predictor == "Sleep Duration", z_score, 0),
+    veg_c = if_else(predictor == "Vegetable Intake", z_score, 0),
+    walk_c = if_else(predictor == "Walking", z_score, 0),
+    fruit_c = 0, 
+    vig_ex_c = 0,
+    mod_ex_c = 0, 
+    education = "Secondary",
+    financial_status_f = "Doing alright",  # FIXED
+    GHQ_c = 0, 
+    has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1]
+  )
+
+lifestyle_viz_grid$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = lifestyle_viz_grid, re.form = NA)
+)
+```
+
+```{r}
+# ==============================================================================
+# 12. SLEEP-RECOVERY CURVE (Interpretable Scale)
+# ==============================================================================
+
+# A. Create grid spanning realistic sleep hours
+# FIXED: Changed financial_status_c to financial_status_f
+sleep_hours_grid <- tibble(
+  total_sleep_hours = seq(4, 10, length.out = 100)
+) %>%
+  mutate(
+    sleep_c = (total_sleep_hours - lifestyle_stats$sleep_m) / lifestyle_stats$sleep_sd,
+    fruit_c = 0,
+    veg_c = 0,
+    walk_c = 0,
+    mod_ex_c = 0,
+    vig_ex_c = 0,
+    education = "Secondary",
+    financial_status_f = "Doing alright",  # FIXED
+    GHQ_c = 0,
+    has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1]
+  )
+
+# B.  Predict
+sleep_hours_grid$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = sleep_hours_grid, re.form = NA)
+)
+
+# C. Find optimal sleep duration
+optimal_sleep <- sleep_hours_grid %>%
+  filter(pred_prob == max(pred_prob)) %>%
+  slice(1)
+
+# D. Plot
+ggplot(sleep_hours_grid, aes(x = total_sleep_hours, y = pred_prob)) +
+  geom_line(linewidth = 1.5, color = "#56B4E9") +
+  geom_ribbon(
+    data = sleep_hours_grid %>% filter(total_sleep_hours >= 7 & total_sleep_hours <= 9),
+    aes(ymin = min(sleep_hours_grid$pred_prob), ymax = pred_prob),
+    fill = "#56B4E9", alpha = 0.2
+  ) +
+  geom_point(
+    data = optimal_sleep,
+    aes(x = total_sleep_hours, y = pred_prob),
+    size = 4, color = "#D55E00"
+  ) +
+  geom_vline(xintercept = 7, linetype = "dashed", color = "grey50", alpha = 0.7, linewidth = 0.6) +
+  geom_vline(xintercept = 9, linetype = "dashed", color = "grey50", alpha = 0.7, linewidth = 0.6) +
+  annotate("text", 
+           x = optimal_sleep$total_sleep_hours + 0.3, 
+           y = optimal_sleep$pred_prob, 
+           label = paste0("Optimal: ", round(optimal_sleep$total_sleep_hours, 1), " hrs"),
+           hjust = 0.8, vjust = -0.8, fontface = "bold", color = "#D55E00") +
+  annotate("text", x = 8, y = min(sleep_hours_grid$pred_prob) + 0.02,
+           label = "Recommended\n(7-9 hrs)", size = 3, color = "grey40") +
+  geom_vline(xintercept = lifestyle_stats$sleep_m, linetype = "dotted", color = "#009E73", linewidth = 0.6) +
+  annotate("text", 
+           x = lifestyle_stats$sleep_m, 
+           y = max(sleep_hours_grid$pred_prob) - 0.02,
+           label = paste0("Sample Mean\n(", round(lifestyle_stats$sleep_m, 1), " hrs)"),
+           size = 2.7, color = "#009E73", vjust = 2.2, fontface = "bold") +
+  labs(
+    title = "The Sleep-Recovery Curve",
+    subtitle = "Pooled 2-year transitions (W7→9 + W13→15) | Nonlinear relationship",
+    x = "Sleep Duration (Hours per Night)",
+    y = "Predicted Probability of Recovery",
+    caption = "Dashed lines indicate CDC recommended sleep (7-9 hrs for adults)"
+  ) +
+  scale_x_continuous(breaks = seq(4, 10, by = 1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+    limits = c(NA, 0.455) 
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0)
+  )
+```
+
+```{r}
+# ==============================================================================
+# 13. PHYSICAL ACTIVITY VISUALIZATION (Days/Week Scale)
+# ==============================================================================
+
+# A. Get stats for converting z-scores to days
+exercise_stats <- model2_df %>%
+  summarise(
+    walk_m = mean(weekly_walked, na.rm = TRUE),
+    walk_sd = sd(weekly_walked, na.rm = TRUE),
+    mod_m = mean(weekly_m_exercised, na.rm = TRUE),
+    mod_sd = sd(weekly_m_exercised, na.rm = TRUE),
+    vig_m = mean(weekly_v_exercised, na.rm = TRUE),
+    vig_sd = sd(weekly_v_exercised, na.rm = TRUE)
+  )
+
+print(exercise_stats)
+
+# B. Build prediction grid in DAYS (0-7 scale)
+exercise_viz_grid <- expand_grid(
+  days_per_week = seq(0, 7, length.out = 100),
+  exercise_type = c("Walking", "Moderate Exercise", "Vigorous Exercise")
+) %>%
+  mutate(
+    # Convert days to z-scores for each exercise type
+    walk_c = if_else(exercise_type == "Walking", 
+                     (days_per_week - exercise_stats$walk_m) / exercise_stats$walk_sd, 
+                     0),
+    mod_ex_c = if_else(exercise_type == "Moderate Exercise", 
+                       (days_per_week - exercise_stats$mod_m) / exercise_stats$mod_sd, 
+                       0),
+    vig_ex_c = if_else(exercise_type == "Vigorous Exercise", 
+                       (days_per_week - exercise_stats$vig_m) / exercise_stats$vig_sd, 
+                       0),
+    
+    # Hold everything else constant at mean
+    sleep_c = 0,
+    fruit_c = 0,
+    veg_c = 0,
+    education = "Secondary",
+    financial_status_f = "Doing alright",
+    GHQ_c = 0,
+    has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1]
+  )
+
+# C.  Predict
+exercise_viz_grid$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = exercise_viz_grid, re.form = NA)
+)
+
+# D. Plot with DAYS on x-axis
+ggplot(exercise_viz_grid, aes(x = days_per_week, y = pred_prob, color = exercise_type)) +
+  geom_line(linewidth = 1.5) +
+  scale_color_manual(
+    values = c(
+      "Walking" = "#E69F00",
+      "Moderate Exercise" = "#56B4E9",
+      "Vigorous Exercise" = "#999999"
+    )
+  ) +
+  # Add vertical lines at sample means
+  geom_vline(xintercept = exercise_stats$walk_m, linetype = "dashed", 
+             color = "#E69F00", linewidth = 1, alpha = 0.5) +
+  geom_vline(xintercept = exercise_stats$mod_m, linetype = "dashed", 
+             color = "#56B4E9", linewidth = 1, alpha = 0.5) +
+  geom_vline(xintercept = exercise_stats$vig_m, linetype = "dashed", 
+             color = "#999999", linewidth = 1, alpha = 0.5) +
+  labs(
+    title = "Physical Activity & Mental Health Recovery",
+    x = "Days Per Week",
+    y = "Predicted Probability of Recovery",
+    color = "Activity Type",
+    caption = paste0(
+      "Dashed lines show sample averages:  Walking = ", round(exercise_stats$walk_m, 1), 
+      ", Moderate = ", round(exercise_stats$mod_m, 1),
+      ", Vigorous = ", round(exercise_stats$vig_m, 1), " days/week"
+    )
+  ) +
+  scale_x_continuous(breaks = 0:7) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0)
+  )
+```
+
+```{r}
+# ==============================================================================
+# WALKING WITH CONTEXT ANNOTATIONS
+# ==============================================================================
+
+walk_only_grid <- tibble(
+  days_per_week = seq(0, 7, length.out = 100)
+) %>%
+  mutate(
+    walk_c = (days_per_week - exercise_stats$walk_m) / exercise_stats$walk_sd,
+    mod_ex_c = 0, vig_ex_c = 0, sleep_c = 0, fruit_c = 0, veg_c = 0,
+    education = "Secondary",
+    financial_status_f = "Doing alright",
+    GHQ_c = 0, has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1]
+  )
+
+walk_only_grid$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = walk_only_grid, re.form = NA)
+)
+
+# Get key values
+prob_at_0 <- walk_only_grid$pred_prob[walk_only_grid$days_per_week == 0]
+prob_at_7 <- walk_only_grid$pred_prob[walk_only_grid$days_per_week == 7]
+prob_at_mean <- walk_only_grid$pred_prob[which.min(abs(walk_only_grid$days_per_week - exercise_stats$walk_m))]
+
+ggplot(walk_only_grid, aes(x = days_per_week, y = pred_prob)) +
+  # Ribbon
+  geom_ribbon(aes(ymin = min(pred_prob), ymax = pred_prob), 
+              fill = "#E69F00", alpha = 0.2) +
+  # Line
+  geom_line(linewidth = 1.5, color = "#E69F00") +
+  # Average line
+  geom_vline(xintercept = exercise_stats$walk_m, linetype = "dashed", color = "grey50") +
+  # Points at key values
+  geom_point(data = tibble(x = c(0, 7), y = c(prob_at_0, prob_at_7)),
+             aes(x = x, y = y), size = 3, color = "#E69F00") +
+  # Annotations
+  annotate("text", x = 0.3, y = prob_at_0 + 0.003, 
+           label = paste0(round(prob_at_0 * 100, 1), "%"), 
+           hjust = 0.85, vjust = -1, fontface = "bold", color = "#E69F00") +
+  annotate("text", x = 6.7, y = prob_at_7 + 0.003, 
+           label = paste0(round(prob_at_7 * 100, 1), "%"), 
+           vjust = 0, fontface = "bold", color = "#E69F00") +
+  annotate("text", x = exercise_stats$walk_m + 0.2, y = 0.395,
+           label = paste0("Sample average\n(", round(exercise_stats$walk_m, 1), " days)"),
+           size = 3, hjust = 0, color = "grey40") +
+  coord_cartesian(ylim = c(0.39, 0.445)) +
+  scale_x_continuous(breaks = 0:7) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Walking & Mental Health Recovery",
+    subtitle = "Daily walkers have ~4 percentage points higher recovery probability than non-walkers",
+    x = "Days Per Week Walking",
+    y = "Predicted Probability of Recovery",
+    caption = "Note: Moderate and vigorous exercise were also tested but showed no significant effect.\nVigorous showed a similar trend but with too much uncertainty to confirm (p = 0.15)."
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0)
+  )
+```
+
+```{r}
+# ==============================================================================
+# DIET STATS
+# ==============================================================================
+
+diet_stats <- model2_df %>%
+  summarise(
+    veg_m = mean(veg_days, na.rm = TRUE),
+    veg_sd = sd(veg_days, na.rm = TRUE),
+    fruit_m = mean(fruit_days, na.rm = TRUE),
+    fruit_sd = sd(fruit_days, na.rm = TRUE)
+  )
+
+print(diet_stats)
+
+# ==============================================================================
+# DIET:  Grouped Bar Chart with Truncated Y-Axis (No Trend Lines)
+# ==============================================================================
+
+# A. Create predictions at actual category values
+diet_category_grid <- expand_grid(
+  days_per_week = c(0, 2, 5, 7),
+  diet_type = c("Vegetable Intake", "Fruit Intake")
+) %>%
+  mutate(
+    veg_c = if_else(diet_type == "Vegetable Intake",
+                    (days_per_week - diet_stats$veg_m) / diet_stats$veg_sd,
+                    0),
+    fruit_c = if_else(diet_type == "Fruit Intake",
+                      (days_per_week - diet_stats$fruit_m) / diet_stats$fruit_sd,
+                      0),
+    sleep_c = 0,
+    walk_c = 0,
+    mod_ex_c = 0,
+    vig_ex_c = 0,
+    education = "Secondary",
+    financial_status_f = "Doing alright",
+    GHQ_c = 0,
+    has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1],
+    category_label = factor(
+      case_when(
+        days_per_week == 0 ~ "Never",
+        days_per_week == 2 ~ "1-3 Days",
+        days_per_week == 5 ~ "4-6 Days",
+        days_per_week == 7 ~ "Daily"
+      ),
+      levels = c("Never", "1-3 Days", "4-6 Days", "Daily")
+    )
+  )
+
+diet_category_grid$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = diet_category_grid, re.form = NA)
+)
+
+# B. Plot with truncated y-axis
+ggplot(diet_category_grid, aes(x = category_label, y = pred_prob, fill = diet_type)) +
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Vegetable Intake" = "#009E73",
+      "Fruit Intake" = "#CC79A7"
+    ),
+    name = "Diet Component"
+  ) +
+  coord_cartesian(ylim = c(0.35, 0.48)) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    breaks = seq(0.35, 0.48, by = 0.02)
+  ) +
+  labs(
+    title = "Diet & Mental Health Recovery",
+    subtitle = "Vegetable intake significantly predicts recovery; fruit shows weaker trend",
+    x = "Days Per Week Eating Fruit/Vegetables",
+    y = "Predicted Probability of Recovery",
+    caption = "Note: Y-axis starts at 35% to show differences more clearly.\nVegetables: p < 0.05 (significant); Fruit: p > 0.05 (not significant)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+```{r}
+# ==============================================================================
+# VISUALIZATION 2: FRUIT VS VEGETABLE COMPARISON
+# ==============================================================================
+
+# A. Build prediction grid for diet
+# FIXED: Changed financial_status_c to financial_status_f
+diet_viz_grid <- expand_grid(
+  z_score = seq(-2, 2, length.out = 100),
+  diet_type = c("Vegetable Intake", "Fruit Intake")
+) %>%
+  mutate(
+    veg_c = if_else(diet_type == "Vegetable Intake", z_score, 0),
+    fruit_c = if_else(diet_type == "Fruit Intake", z_score, 0),
+    sleep_c = 0,
+    walk_c = 0,
+    mod_ex_c = 0,
+    vig_ex_c = 0,
+    education = "Secondary",
+    financial_status_f = "Doing alright",  # FIXED
+    GHQ_c = 0,
+    has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1]
+  )
+
+# B. Predict
+diet_viz_grid$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = diet_viz_grid, re.form = NA)
+)
+
+# C. Get raw scale labels
+
+# Diet visualization with days/week on x-axis
+
+# Create grid in raw days/week scale
+diet_viz_grid_days <- expand_grid(
+  days_per_week = seq(0, 7, length.out = 100),
+  diet_type = c("Vegetable Intake", "Fruit Intake")
+) %>%
+  mutate(
+    veg_c = if_else(diet_type == "Vegetable Intake", 
+                    (days_per_week - diet_stats$veg_m) / diet_stats$veg_sd, 
+                    0),
+    fruit_c = if_else(diet_type == "Fruit Intake", 
+                      (days_per_week - diet_stats$fruit_m) / diet_stats$fruit_sd, 
+                      0),
+    sleep_c = 0,
+    walk_c = 0,
+    mod_ex_c = 0,
+    vig_ex_c = 0,
+    education = "Secondary",
+    financial_status_f = "Doing alright",
+    GHQ_c = 0,
+    has_partner = 1,
+    age_group = model2_df$age_group[1],
+    sex = model2_df$sex[1],
+    wave_factor = modal_wave_lifestyle,
+    pidp = model2_df$pidp[1]
+  )
+
+# Predict
+diet_viz_grid_days$pred_prob <- plogis(
+  predict(lifestyle_model, newdata = diet_viz_grid_days, re.form = NA)
+)
+
+# Plot with interpretable x-axis
+ggplot(diet_viz_grid_days, aes(x = days_per_week, y = pred_prob, color = diet_type)) +
+  geom_line(linewidth = 1.5) +
+  scale_color_manual(
+    values = c(
+      "Vegetable Intake" = "#009E73",
+      "Fruit Intake" = "#CC79A7"
+    )
+  ) +
+  labs(
+    title = "Diet & Mental Health Recovery",
+    x = "Days Per Week Consuming Fruit/Vegetables",
+    y = "Predicted Probability of Recovery",
+    color = "Diet Component",
+    caption = paste0(
+      "Sample means: Vegetables = ", round(diet_stats$veg_m, 1), " days/week, ",
+      "Fruit = ", round(diet_stats$fruit_m, 1), " days/week"
+    )
+  ) +
+  scale_x_continuous(breaks = c(0, 2, 5, 7), 
+                     labels = c("Never", "1-3 Days", "4-6 Days", "Daily")) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "grey30"),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0)
+  )
+```
+
+```{r}
+# ==============================================================================
+# 13. MODEL COMPARISON:  SENSITIVITY ANALYSIS
+# ==============================================================================
+
+# A. Compare pooled vs single-wave for lifestyle (if enough data)
+if(sum(model2_df$wave_numeric == 13) > 100) {
+  
+  lifestyle_single <- model2_df %>% filter(wave_numeric == 13)
+  
+  # FIXED: Changed financial_status_c to financial_status_f
+  lifestyle_model_single <- glmer(
+    reliable_recovery ~ 
+      GHQ_c + 
+      ns(sleep_c, df = 2) + fruit_c + veg_c + 
+      walk_c + mod_ex_c + vig_ex_c + 
+      education + financial_status_f +  # FIXED
+      as.factor(has_partner) +
+      as.factor(age_group) + as.factor(sex) + 
+      (1 | pidp), 
+    data = lifestyle_single, 
+    family = binomial,
+    control = glmerControl(optimizer = "bobyqa")
+  )
+  
+  # Compare key coefficients
+  comparison <- bind_rows(
+    tidy(lifestyle_model, conf.int = TRUE) %>% mutate(model = "Pooled (W7+W13)"),
+    tidy(lifestyle_model_single, conf.int = TRUE) %>% mutate(model = "Single (W13 only)")
+  ) %>%
+    filter(term %in% c("fruit_c", "veg_c", "vig_ex_c", "walk_c")) %>%  # FIXED: Added walk_c
+    select(model, term, estimate, std.error, p.value)
+  
+  print("=== SENSITIVITY ANALYSIS:  Pooled vs Single Wave ===")
+  print(comparison)
+}
+```
+
+```{r}
+# ==============================================================================
+# 14. SUMMARY TABLE:  BOTH MODELS
+# ==============================================================================
+
+# A. Extract coefficients from all models
+social_partnered_coef <- tidy(partnered_model, conf.int = TRUE) %>%
+  mutate(model = "Social - Partnered")
+
+social_unpartnered_coef <- tidy(unpartnered_model, conf.int = TRUE) %>%
+  mutate(model = "Social - Unpartnered")
+
+lifestyle_coef <- tidy(lifestyle_model, conf.int = TRUE) %>%
+  mutate(model = "Lifestyle")
+
+# B.  Combine and format
+all_coefs <- bind_rows(
+  social_partnered_coef,
+  social_unpartnered_coef,
+  lifestyle_coef
+) %>%
+  filter(effect == "fixed") %>%
+  filter(! grepl("Intercept|age_group|sex|wave_factor", term)) %>%
+  select(model, term, estimate, std.error, p.value, conf.low, conf.high) %>%
+  mutate(
+    estimate = round(estimate, 3),
+    std.error = round(std.error, 3),
+    p.value = round(p.value, 4),
+    significance = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01 ~ "**",
+      p.value < 0.05 ~ "*",
+      p.value < 0.10 ~ ".",
+      TRUE ~ ""
+    )
+  )
+
+print("=== SUMMARY:  ALL MODEL COEFFICIENTS ===")
+print(all_coefs, n = 50)
+
+# C. Model fit statistics
+model_fit <- tibble(
+  Model = c("Social - Partnered", "Social - Unpartnered", "Lifestyle"),
+  N = c(nrow(social_df_partnered), nrow(social_df_unpartnered), nrow(model2_df)),
+  Recovery_Rate = c(
+    mean(social_df_partnered$reliable_recovery, na.rm = TRUE),
+    mean(social_df_unpartnered$reliable_recovery, na.rm = TRUE),
+    mean(model2_df$reliable_recovery, na.rm = TRUE)
+  ),
+  AIC = c(AIC(partnered_model), AIC(unpartnered_model), AIC(lifestyle_model)),
+  Waves_Pooled = c("W5→7 + W11→13", "W5→7 + W11→13", "W7→9 + W13→15"),
+  Gap = c("2 years", "2 years", "2 years")
+) %>%
+  mutate(Recovery_Rate = round(Recovery_Rate, 3))
+
+print("=== MODEL FIT SUMMARY ===")
+print(model_fit)
+```
