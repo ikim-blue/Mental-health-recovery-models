@@ -778,7 +778,6 @@ viz_grid_unpartnered_support <- expand_grid(
   )
 
 # F. Build Grid for TOTAL SUPPORT (all sources move together)
-# FIXED: Changed financial_status_c to financial_status_f
 viz_grid_total_partnered_support <- tibble(
   support_raw = seq(1, 4, length.out = 100)
 ) %>%
@@ -802,7 +801,6 @@ viz_grid_total_partnered_support <- tibble(
     support_type = "Total support"
   )
 
-# FIXED: Changed financial_status_c to financial_status_f
 viz_grid_total_unpartnered_support <- tibble(
   support_raw = seq(1, 4, length.out = 100)
 ) %>%
@@ -1442,10 +1440,6 @@ ggplot(exercise_viz_grid, aes(x = days_per_week, y = pred_prob, color = exercise
 ```
 
 ```{r}
-# ==============================================================================
-# WALKING WITH CONTEXT ANNOTATIONS
-# ==============================================================================
-
 walk_only_grid <- tibble(
   days_per_week = seq(0, 7, length.out = 100)
 ) %>%
@@ -1604,7 +1598,7 @@ ggplot(diet_category_grid, aes(x = category_label, y = pred_prob, fill = diet_ty
 
 ```{r}
 # ==============================================================================
-# VISUALIZATION 2: FRUIT VS VEGETABLE COMPARISON
+# VISUALIZATION: FRUIT VS VEGETABLE COMPARISON
 # ==============================================================================
 
 # A. Build prediction grid for diet
@@ -1703,7 +1697,7 @@ ggplot(diet_viz_grid_days, aes(x = days_per_week, y = pred_prob, color = diet_ty
 
 ```{r}
 # ==============================================================================
-# 13. MODEL COMPARISON:  SENSITIVITY ANALYSIS
+# 14. MODEL COMPARISON:  SENSITIVITY ANALYSIS
 # ==============================================================================
 
 # A. Compare pooled vs single-wave for lifestyle (if enough data)
@@ -1741,7 +1735,7 @@ if(sum(model2_df$wave_numeric == 13) > 100) {
 
 ```{r}
 # ==============================================================================
-# 14. SUMMARY TABLE:  BOTH MODELS
+# 15. SUMMARY TABLE:  BOTH MODELS
 # ==============================================================================
 
 # A. Extract coefficients from all models
