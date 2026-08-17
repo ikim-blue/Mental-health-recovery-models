@@ -3,7 +3,7 @@
 **[Read the full published analysis on Medium](https://ucladatares.medium.com/what-predicts-bouncing-back-from-mental-health-struggles-775586d166af)**
 
 ## Summary
-This repository contains the code and methodology I used to analyze longitudinal mental health recovery outcomes. Using data from the UK Household Longitudinal Study (UKHLS) spanning 2010 to 2024 (n > 13,000), this project utilizes mixed-effects modeling to account for hierarchical variance across time and demographic cohorts. The analysis identifies the primary physical and social factors that predict sustained mental health recovery (defined as a drop of at least 4 points on the GHQ-12 index). The findings from this analysis were published as a featured article on Medium by UCLA DataRes. 
+This repository contains the code and methodology I used to analyze longitudinal mental health recovery outcomes. Using data from the UK Household Longitudinal Study (UKHLS) spanning 2010 to 2024 (n > 13,000), this project utilized mixed-effects modeling to account for hierarchical variance across time and demographic cohorts. The analysis identified the primary physical and social factors that predict sustained mental health recovery (defined as a drop of at least 4 points on the GHQ-12 index). The findings from this analysis were published as a featured article on Medium by UCLA DataRes. 
 
 ## Methodology
 Standard associational models fail to capture the inherent within-subject correlation present in longitudinal health surveys. To rigorously map this data-generating process across two-year intervals, this project implemented **Mixed-Effects Models** (Hierarchical Linear Modeling). 
