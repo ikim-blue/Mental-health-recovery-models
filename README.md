@@ -16,6 +16,6 @@ Standard associational models fail to capture the inherent within-subject correl
 * `MH_data_pipeline.ipynb` : Python notebook that standardizes inputs, handles missingness, and formats the longitudinal data into a tidy format.
 * `MH_mixed_effects_modeling.Rmd` : R Markdown file containing the core model architecture (fitting the mixed-effects equations) and generating the model-related data visualizations used in the Medium publication.
 
-## Coding Information
+## Code Description
 * **Languages:** Python, R
 * **Key Libraries:** pandas, lme4, ggplot2
